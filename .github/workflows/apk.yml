@@ -1,0 +1,85 @@
+name: Build Android APK
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Prepare web files
+        run: |
+          mkdir -p www
+          cp index.html style.css app.js store.js manifest.json sw.js icon-192.png icon-512.png www/
+
+      - name: Install Capacitor and icon tools
+        run: |
+          npm init -y
+          npm i @capacitor/core@6 @capacitor/cli@6 @capacitor/android@6 @capacitor/share@6 @capacitor/filesystem@6 @capacitor/app@6 @capacitor-mlkit/barcode-scanning@6 @capacitor/assets sharp esbuild @zxing/browser @zxing/library
+
+      - name: Bundle app JavaScript with the native Share plugin
+        run: |
+          npx esbuild app.js --bundle --format=esm --outfile=www/app.js
+
+      - name: Create Android launcher icon from logo.png
+        run: |
+          test -f logo.png || (echo "ERROR: logo.png was not found in the repository root." && exit 1)
+          mkdir -p assets
+          node --input-type=module -e "import sharp from 'sharp'; await sharp('logo.png').resize(1024, 1024, { fit: 'contain', background: { r: 255, g: 255, b: 255, alpha: 0 } }).png().toFile('assets/icon.png');"
+          file assets/icon.png
+
+      - name: Initialize Android project
+        run: |
+          npx cap init PhoneManager com.shop.phonemanager --web-dir www
+          # اجازه اتصال HTTP به سرور شخصی (androidScheme=http برای جلوگیری از Mixed Content)
+          rm -f capacitor.config.ts capacitor.config.json
+          cat > capacitor.config.json <<'EOF'
+          {
+            "appId": "com.shop.phonemanager",
+            "appName": "PhoneManager",
+            "webDir": "www",
+            "server": { "androidScheme": "http", "cleartext": true }
+          }
+          EOF
+          npx cap add android
+          sed -i 's#<string name="app_name">.*</string>#<string name="app_name">موبایل‌یار</string>#' android/app/src/main/res/values/strings.xml
+
+      - name: Generate native Android icons from logo.png
+        run: |
+          npx capacitor-assets generate --android
+          npx cap sync android
+
+      - name: Allow cleartext traffic in AndroidManifest
+        run: |
+          M=android/app/src/main/AndroidManifest.xml
+          grep -q usesCleartextTraffic $M || sed -i 's#<application#<application android:usesCleartextTraffic="true"#' $M
+          grep -n "usesCleartextTraffic" $M
+
+      - name: Add camera permission for the barcode scanner
+        run: |
+          M=android/app/src/main/AndroidManifest.xml
+          grep -q "android.permission.CAMERA" $M || sed -i 's#</manifest>#    <uses-permission android:name="android.permission.CAMERA" />\n    <uses-feature android:name="android.hardware.camera" android:required="false" />\n</manifest>#' $M
+          grep -n "CAMERA" $M
+          # دانلود ماژول اسکنر گوگل همزمان با نصب برنامه
+          grep -q "com.google.mlkit.vision.DEPENDENCIES" $M || sed -i 's#</application>#    <meta-data android:name="com.google.mlkit.vision.DEPENDENCIES" android:value="barcode_ui"/>\n    </application>#' $M
+          grep -n "mlkit" $M
+
+      - name: Build APK
+        run: |
+          cd android
+          ./gradlew assembleDebug
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: phone-manager-apk
+          path: android/app/build/outputs/apk/debug/app-debug.apk
